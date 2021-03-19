@@ -1,0 +1,240 @@
+---
+title: "Biost544_hw4"
+author: Ziyuan Wang
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(haven)
+library(ggplot2)
+library(dplyr)
+swan <- read_dta("~/Downloads/SWANdata_visit0/28762-0001-Data.dta")
+load("/Users/marcy/Downloads/ICPSR_32961/DS0001/32961-0001-Data.rda")
+swan10 <- da32961.0001
+```
+# Processing the dataset
+I want to try the simple way of analysis first, that is to look at baseline data and compare bone mineral density in patients of different smoking status, while adjusting for covariates as confounders and effect modifers. From the swan baseline dataset, I extract the variables SWANID (ID), SPBMDT0 (total spine BMD), AGE0 (age at baseline), HEIGHT0 (height at baseline), WEIGHT0 (weight at baseline), BMI0 (BMI at baseline), DTVITD0 (VD supplement), SMOKERE0 (ever smoked regularly).
+```{r}
+# subset the variables of interest from the swan dataset
+swan.keep <- swan[,c("SWANID","SPBMDT0", "AGE0","HEIGHT0","WEIGHT0",
+                     "BMI0","DTVITD0","SMOKERE0","HHMEMSM0", "INCOME0")]
+# recode the missing values to NA
+swan.keep[swan.keep == -1] <- NA
+swan.keep[swan.keep == -8] <- NA
+swan.keep[swan.keep == -7] <- NA
+swan.keep[swan.keep == -9] <- NA
+# assume missingness at random and only use the complete cases
+swan.all <- swan.keep[complete.cases(swan.keep), ]
+swan.all$SMOKERE0 <- ifelse(swan.all$SMOKERE0 == 2, 1, 0)
+```
+# Calculate the propensity
+Since the trial is observational, we want to account for the effect of variables that can be confounders. We will use the IPW method first and calculate propensities.
+```{r}
+# get the propensities
+propen.model <- glm(as.factor(SMOKERE0) ~ AGE0 + HEIGHT0 + WEIGHT0 + 
+                      BMI0 + DTVITD0  + as.factor(HHMEMSM0) + as.factor(INCOME0), 
+                    family=binomial, data=swan.all)
+propensities <- predict(propen.model, data=swan.all, type="response")
+# plot the propensities for the two groups
+ggplot(data.frame(propensities=propensities, smoking=as.factor(swan.all$SMOKERE0)), 
+       aes(x = propensities, y = ..density.., color = smoking)) + geom_density() 
+# alot of propensity close to 1, need truncation
+# get the range of propensities
+range(propensities)
+# truncate the propensities score, don't want close to 1 scores
+trunc.propen <- propensities %>% pmin(0.95) %>% pmax(0.05)
+```
+# Calculate the ratio of the probabiliteis and the differences
+Using the propensity scores, we can get the estimate difference by inversing weight by these probabilities. The estimated difference we get is -0.0047. This is a negative value and small difference. Next we want to use the boostrap method to get the corresponding confidence interval.
+```{r}
+n <- nrow(swan.all)
+weights <- rep(0, n)
+## for patients who smoke:
+representative.propen <- sum(swan.all$SMOKERE0 == 1) / n
+actual.propen <- trunc.propen
+## get the indices for patients who smoked
+smoke.ind <- which(swan.all$SMOKERE0 == 1)
+## calculate the weight using IPW for smokers and non-smokers
+weights[smoke.ind] <- representative.propen/actual.propen[smoke.ind]
+weights[-smoke.ind]<- (1 - representative.propen)/(1- actual.propen[-smoke.ind])
+## plot the weights
+ggplot(data.frame(weights = weights), aes(x=weights, y =..density..)) + 
+  geom_histogram()
+## calculate the BMD value for smokers and non-smokers
+smoking.BMD.est <- with(swan.all,
+                         mean((weights*SPBMDT0)[smoke.ind]))
+nonsmoking.BMD.est <- with(swan.all,
+                             mean((weights*SPBMDT0)[-smoke.ind]))
+## calculate the differences in BMD for the two groups
+(diff.est <- smoking.BMD.est - nonsmoking.BMD.est)
+```
+# Calculate the confidence interval using boostrap
+The confidence interval obtained is (-0.01386, 0.00698). The CI contains 0, indicating that the difference may not be significant.
+```{r}
+# function to calculate the weight
+calc_weighted_outcome <- function(outcome, label, props){
+  weights <- rep(0, length(outcome))
+  
+  representative.propen <- mean(label)
+  actual.propen <- props
+
+  treat.ind <- which(label == 1)
+  weights[treat.ind] <- representative.propen/actual.propen[treat.ind]
+  weights[-treat.ind]<- (1 - representative.propen)/(1- actual.propen[-treat.ind])
+  
+  weighted.outcome <- outcome*weights
+  
+  return(weighted.outcome)
+}
+# function to get the effect
+calc_stat_weighted <- function(weighted.outcome, label){
+  return(mean(weighted.outcome[label == 1]) - mean(weighted.outcome[label == 0]))
+}
+
+
+do_one <- function(dat){ # the association is not distorted, confounding effect the same
+  resample.inds <- sample(1:nrow(dat), replace = TRUE)
+  resample.dat <- dat[resample.inds,]
+  # with resampled data
+  propen.model <- glm(as.factor(SMOKERE0) ~ AGE0 + HEIGHT0 + WEIGHT0 + 
+                        BMI0 + DTVITD0  + as.factor(HHMEMSM0) + as.factor(INCOME0), 
+                      family=binomial, data=resample.dat)
+  propensities <- predict(propen.model, data = resample.dat, type = "response")
+  trunc.prop <- propensities %>% pmax(0.05) %>% pmin(0.95)
+  
+  weighted.outcome.resamp <- calc_weighted_outcome(resample.dat$SPBMDT0,
+                                                   resample.dat$SMOKERE0,
+                                                   trunc.prop)
+  mean.diff <- calc_stat_weighted(weighted.outcome.resamp, resample.dat$SMOKERE0)
+  return(mean.diff)
+}
+
+set.seed(2)
+boot.dist <- replicate(1e3,
+                    do_one(swan.all))
+distance.U.L <- quantile(boot.dist, c(0.05,0.95)) - diff.est
+(CI <- diff.est - distance.U.L[2:1])
+```
+# Rerandomization and calculate p-value
+Next we can permute and calculate a p-value. After doing permutation testing for 1000 times, we can get a p-value of 0.549. We failed to reject the null hypothesis that there is no association between smoking history and bone mineral density, while adjusting for potential confounders.
+```{r}
+## one permuation function
+one.propen.per <- function(outcome, propen){
+  # number of label permuation
+  n <- length(outcome)
+  # permute the labels
+  label <- rbinom(n,1,propen)
+  # empty vector to store weights
+  weights <- rep(0,n)
+  # pi rep calculation
+  representative <- mean(label)
+  actual <- propen
+  # assign indices
+  ind.t <- which(label == 1)
+  # calculate weights for both groups
+  weights[ind.t] <- (representative/actual)[ind.t]
+  weights[-ind.t] <- ((1-representative)/(1-actual))[-ind.t]
+  # return the differences of outcome
+  return(mean((weights*outcome)[ind.t]) - mean((weights*outcome)[-ind.t]))
+}
+set.seed(2)
+# replicate the differences
+rerandomized.diffs <- 
+  replicate(1e3, one.propen.per(swan.all$SPBMDT0, trunc.propen))
+# plot the rerandomized differences
+ggplot(data.frame(diffs = rerandomized.diffs), aes(x = diffs, y = ..density..)) +
+  geom_density() + 
+  geom_vline(xintercept = diff.est, color = "red")
+# calculate p-val
+mean(rerandomized.diffs > diff.est)
+```
+# Using standardization method
+The second method we can use is the standardization method using logistical regression. The point estimate of the difference in BMD between the two groups is -0.00351, a little smaller than the point estimate we obtained using the IPW method. 
+```{r}
+# get the outcome regression with outcome as the BMD value and predictors as the smoking status + confoudners
+outcome.regression <- glm(SPBMDT0 ~ as.factor(SMOKERE0) + AGE0 + HEIGHT0 + 
+                            WEIGHT0 + BMI0 + DTVITD0  + as.factor(HHMEMSM0) + as.factor(INCOME0), 
+                          family = gaussian, data=swan.all)
+# probabilities if they had smoked
+BMD.smoker <- swan.all %>% mutate(SMOKERE0 = 1)
+# probabilities if they had not smoked
+BMD.nonsmoker <- swan.all %>% mutate(SMOKERE0 = 0)
+# calculate the difference
+(standardized.est <- mean(predict(outcome.regression, 
+                                   BMD.smoker, 
+                                   type = "response") -
+                             predict(outcome.regression, 
+                                     BMD.nonsmoker, 
+                                     type = "response")))
+
+
+```
+# Calculate the confidence interval
+The confidence interval obtained is (-0.01157, 0.00524). The CI contains 0, indicating that the difference may not be significant.
+```{r}
+do_one_std <- function(dat){ # the association is not distorted, confounding effect the same
+  resample.inds <- sample(1:nrow(dat), replace = TRUE) 
+  resample.dat <- dat[resample.inds,]
+  # with resampled data
+ outcome.regression <- glm(SPBMDT0 ~ as.factor(SMOKERE0) + AGE0 + HEIGHT0 + 
+                            WEIGHT0 + BMI0 + DTVITD0  + as.factor(HHMEMSM0) + as.factor(INCOME0), 
+                          family = gaussian, data=resample.dat)
+# probabilities if they had smoked
+BMD.smoker <-  resample.dat %>% mutate(SMOKERE0 = 1)
+# probabilities if they had not smoked
+BMD.nonsmoker <- resample.dat %>% mutate(SMOKERE0 = 0)
+# calculate the difference
+standardized.est <- mean(predict(outcome.regression, 
+                                   BMD.smoker, 
+                                   type = "response") -
+                             predict(outcome.regression, 
+                                     BMD.nonsmoker, 
+                                     type = "response"))
+return(standardized.est)
+}
+
+set.seed(2)
+boot.dist <- replicate(1e3,
+                    do_one_std(swan.all))
+distance.U.L <- quantile(boot.dist, c(0.05,0.95)) - standardized.est
+(CI <- standardized.est - distance.U.L[2:1])
+
+
+```
+# Calculate p-value for the standardization test
+```{r}
+# one permuation for standardization test
+one.std.per <- function(data){
+  perm <- sample(1:nrow(data), replace = FALSE) ## generating shuffled ids
+  perm.data <- data
+  perm.data$SMOKERE0 = data$SMOKERE0[perm] # mixing everything randomly
+  outcome.regression <- glm(SPBMDT0 ~ as.factor(SMOKERE0) + AGE0 + HEIGHT0 + WEIGHT0 + 
+                              BMI0 + DTVITD0  + as.factor(HHMEMSM0) + as.factor(INCOME0), 
+                            family = gaussian, data=perm.data)
+# probabilities if they had smoked
+BMD.smoker.perm <- perm.data %>% mutate(SMOKERE0 = 1)
+# probabilities if they had not smoked
+BMD.nonsmoker.perm <- perm.data %>% mutate(SMOKERE0 = 0)
+# calculate the difference
+standardized.est <- mean(predict(outcome.regression, 
+                                   BMD.smoker.perm, 
+                                   type = "response") -
+                             predict(outcome.regression, 
+                                     BMD.nonsmoker.perm, 
+                                     type = "response"))
+standardized.est
+}
+set.seed(2)
+# replicate the differences
+rerandomized.diffs.std <- 
+  replicate(1e3, one.std.per(swan.all))
+# plot the rerandomized differences
+ggplot(data.frame(diffs = rerandomized.diffs.std), aes(x = diffs, y = ..density..)) +
+  geom_density() + 
+  geom_vline(xintercept = standardized.est, color = "red")
+# calculate p-val
+mean(rerandomized.diffs.std > standardized.est)
+```

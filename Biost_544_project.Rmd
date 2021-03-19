@@ -1,0 +1,174 @@
+---
+title: "biost544_project"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+BCSC <- read.csv("~/Downloads/BCSC.csv")
+library(table1)
+library(glmnet)
+library(pROC)
+head(BCSC,10)
+```
+
+```{r}
+BCSC[BCSC == "9"] <- NA
+BCSC <- subset(BCSC, select = -c(13))
+BCSC <- BCSC[complete.cases(BCSC), ]
+nrow(BCSC)
+head(BCSC)
+BCSC$Assessment <- 
+  factor(BCSC$assess_c, levels=c(0,1,2,3,4,5),
+         labels=c("Needs additional imaging", 
+                  "Negative",
+                  "Benign findings",
+                  "Probably benign",
+                  "Suspicious abnormality",
+                  "Highly suggestive of malignancy"))
+BCSC$Cancer <- factor(BCSC$cancer_c, levels=c(1,0),
+                  labels = c("Cancer diagnosis","No cancer diagnosis"))
+BCSC$Type <- factor(BCSC$density_c, levels=c(1:4),
+                  labels = c("Almost entirely fatty",
+                             "Scattered fibroglandular densities",
+                             "Heterogeneously dense",
+                             "Extremely dense"))
+BCSC$Family <- factor(BCSC$famhx_c, levels = c(0,1,9), labels = c("No", "Yes","Missing"))
+BCSC$Hormone <- factor(BCSC$hrt_c, levels = c(0,1,9), labels = c("No", "Yes","Missing"))
+BCSC$Biopsy <- factor(BCSC$biophx_c, levels = c(0,1,9), labels = c("No", "Yes","Missing"))
+BCSC$Prior <- factor(BCSC$compfilm_c, levels = c(0,1,9), labels = c("No", "Yes","Missing"))
+BCSC$prv <- factor(BCSC$prvmam_c, levels = c(0,1,9), labels = c("No", "Yes","Missing"))
+BCSC$mam_type <- factor(BCSC$mammtype, levels = c(1,2), labels = c("Film mammogram", "Digital mammogram"))
+label(BCSC$Assessment) <- "Radiologist’s assessment based on the BI-RADS scale"
+label(BCSC$Cancer) <- "Cancer diagnosis within one year of screening"
+label(BCSC$Family) <- "Family history of breast cancer"
+label(BCSC$Hormone) <- "Current use of hormone therapy"
+label(BCSC$Biopsy) <- "History of breast biopsy"
+label(BCSC$Type) <- "Patient’s breast density"
+label(BCSC$Prior) <- "Previous mammogram available"
+label(BCSC$prv) <- "Ever received a prior mammogram"
+label(BCSC$age_c) <- "Age at time of mammogram"
+label(BCSC$bmi_c) <- "Body mass index at time of mammogram"
+label(BCSC$mam_type) <- "Mammogram type"
+
+
+table1(~Assessment+Family+Hormone+Biopsy+Type+Prior+prv+bmi_c+age_c+mam_type|Cancer,data=BCSC)
+```
+# full ridge and lasso
+```{r}
+nlambda <- 1000
+maxlambda <- 1
+lambda.seq <- seq(maxlambda, maxlambda*0.001, length.out=nlambda)
+BCSC.keep <- BCSC[c("cancer_c", "assess_c", "density_c","famhx_c","hrt_c","biophx_c","prvmam_c","compfilm_c","mammtype","age_c")]
+## lasso regression
+BCSC.keep.mx <- as.matrix(BCSC.keep)
+fit.las <- cv.glmnet(x=BCSC.keep.mx[, -1], y=BCSC.keep.mx[,1], alpha=1,nfolds = 5,lambda=lambda.seq)
+
+fit1 <- fit.lasso(BCSC.keep.mx, fit.las$lambda.min)
+preds <- predict(fit1, BCSC.keep.mx[,-1])
+r1 <- roc(BCSC.keep$cancer_c, preds, plot=TRUE,legacy.axes=TRUE, print.auc=TRUE, xlab = "False positive", ylab = "True positive", col = "#377eb8")
+## ridge regression
+fit.rid <- cv.glmnet(x=BCSC.keep.mx[, -1], y=BCSC.keep.mx[,1], alpha=0,nfolds = 5,lambda=lambda.seq)
+fit2 <- fit.ridge(BCSC.keep.mx, fit.rid$lambda.min)
+preds2 <- predict(fit2, BCSC.keep.mx[,-1])
+r2 <- roc(BCSC.keep$cancer_c, preds2, plot=TRUE,legacy.axes=TRUE, print.auc=TRUE, xlab = "False positive", ylab = "True positive", col = "#377eb8")
+## find the threshold
+best.threshold.ridge <- coords(r1, "best", ret = "threshold", best.method = "youden")
+best.threshold.lasso <- coords(r2, "best", ret = "threshold", best.method = "youden")
+# for pre-selected variables
+BCSC.sel <- BCSC[c("cancer_c", "assess_c", "density_c", "famhx_c", "prvmam_c", "biophx_c")]
+BCSC.sel.mx <- data.matrix(BCSC.sel)
+#
+fit.las.sel <- cv.glmnet(x=BCSC.sel.mx[, -1], y=BCSC.sel.mx[,1], alpha=1,nfolds = 5,lambda=lambda.seq)
+fit1.sel <- fit.lasso(BCSC.sel.mx, fit.las.sel$lambda.min)
+preds.sel <- predict(fit1.sel, BCSC.sel.mx[,-1])
+r1.sel <- roc(BCSC.keep$cancer_c, preds.sel, plot=TRUE,legacy.axes=TRUE, print.auc=TRUE, xlab = "False positive", ylab = "True positive", col = "#377eb8")
+coef.list <- coef(fit.las.sel, s=fit.las.sel$lambda.min)
+## ridge regression
+fit.rid.sel <- cv.glmnet(x=BCSC.sel.mx[, -1], y=BCSC.sel.mx[,1], alpha=0,nfolds = 5,lambda=lambda.seq)
+fit2.sel <- fit.ridge(BCSC.sel.mx, fit.rid.sel$lambda.min)
+preds2.sel <- predict(fit2.sel, BCSC.sel.mx[,-1])
+r2.sel <- roc(BCSC.keep$cancer_c, preds2.sel, plot=TRUE,legacy.axes=TRUE, print.auc=TRUE, xlab = "False positive", ylab = "True positive", col = "#377eb8")
+## find the threshold
+best.threshold.ridge.sel <- coords(r1.sel, "best", ret = "threshold", best.method = "youden")
+best.threshold.lasso.sel <- coords(r2.sel, "best", ret = "threshold", best.method = "youden")
+# for the best subset selection method
+glm.fit.bss<-glm(cancer_c~ as.factor(assess_c) + as.factor(biophx_c), data=BCSC.keep, family =binomial)
+r.bss <- roc(BCSC.keep$cancer_c, glm.fit.bss$fitted.values, plot=TRUE,legacy.axes=TRUE, print.auc=TRUE, xlab = "False positive", ylab = "True positive", col = "#377eb8")
+best.threshold.lasso.sel <- coords(r.bss, "best", ret = "threshold", best.method = "youden")
+```
+
+```{r}
+par(pty = "s")
+roc(BCSC.keep$cancer_c, preds, plot=TRUE,legacy.axes=TRUE, print.auc=TRUE, xlab = "False positive", ylab = "True positive", col = "#377eb8")
+plot.roc(BCSC.keep$cancer_c, preds2,legacy.axes=TRUE, print.auc=TRUE, add = TRUE, col = "#4daf4a", print.auc.y = 0.45)
+plot.roc(BCSC.keep$cancer_c, preds.sel,legacy.axes=TRUE, print.auc=TRUE,add = TRUE, col = "#FFCC00", print.auc.y = 0.4)
+plot.roc(BCSC.keep$cancer_c, preds2.sel,legacy.axes=TRUE, print.auc=TRUE, add = TRUE, col = "#FF3366", print.auc.y = 0.35)
+plot.roc(BCSC.keep$cancer_c, glm.fit.bss$fitted.values,legacy.axes=TRUE, print.auc=TRUE, add = TRUE, col = "#330066", print.auc.y = 0.30)
+
+legend("bottomright", legend=c("Lasso full (Threshold:0.0122)","Ridge full (Threshold:0.0126)","lasso selected (Threshold: 0.0122)","Ridge selected (Threshold: 0.0117)", "Best subset selection (Threshold: 0.008)"), col = c("#377eb8", "#4daf4a","#FFCC00","#FF3366","#330066"), lwd = 4, cex = 0.75)
+
+```
+
+```{r}
+bcsc <- read.csv("~/Downloads/BCSC.csv")
+bcsc = bcsc[!(bcsc$compfilm_c == 9), ]
+bcsc = bcsc[!(bcsc$famhx_c == 9), ]
+bcsc = bcsc[!(bcsc$hrt_c == 9), ]
+bcsc = bcsc[!(bcsc$prvmam_c == 9), ]
+bcsc = bcsc[!(bcsc$biophx_c == 9), ]
+bcsc = bcsc[!(bcsc$CaTypeO == 9), ]
+bcsc = bcsc[!(bcsc$bmi_c == -99), ]
+bcsc = bcsc[!(bcsc$estrecep_c== 9), ]
+
+##
+nlambda = 100
+maxlambda <- 1
+my.lambda.seq <- seq(maxlambda, maxlambda*0.01, length.out=nlambda)
+my.lambda.seq
+##
+BCSC.keep <- BCSC[c("cancer_c", "assess_c", "density_c","famhx_c","hrt_c","biophx_c","prvmam_c","compfilm_c","mammtype","age_c")]
+datmat <- data.matrix(BCSC.keep)
+
+fit.lasso.perm <- cv.glmnet(x=datmat[,-1], y=datmat[,1], alpha=1, lambda=my.lambda.seq, family = "binomial")
+plot(fit.lasso.perm)
+
+coef.list <- coef(fit.lasso.perm, s=fit.lasso.perm$lambda.min)
+
+fit.lasso = function(data, lambda) {
+  fit = glmnet(x=data[,-1], y=data[,1], alpha=1, lambda=lambda)
+  return (fit)
+}
+fit1 <- fit.lasso(datmat, fit.cv$lambda.min)
+summary(fit1)
+preds <- predict(fit.lasso.perm, datmat[,-1])
+roc(bcsc$cancer_c, preds, plot=TRUE,legacy.axes=TRUE, print.auc=TRUE, xlab = "False positive", ylab = "True positive", col = "#377eb8")
+
+
+#
+set.seed(1)
+
+nlambda = 100
+maxlambda <- 2
+my.lambda.seq <- seq(maxlambda, maxlambda*0.01, length.out=nlambda)
+my.lambda.seq
+
+bcsc.perm <- bcsc %>% select("cancer_c", "assess_c", "density_c", "famhx_c", "prvmam_c", "biophx_c")
+datmat <- data.matrix(bcsc.perm)
+
+fit.ridge.perm <- cv.glmnet(x=datmat[,-1], y=datmat[,1], alpha=0, lambda=my.lambda.seq, family = "binomial")
+plot(fit.ridge.perm)
+
+coef.list <- coef(fit.ridge.perm, s=fit.ridge.perm$lambda.min)
+
+
+#
+fit.ridge = function(data, lambda) {
+  fit = glmnet(x=data[,-1], y=data[,1], alpha=0, lambda=lambda)
+  return (fit)
+}
+ridge.model = fit.ridge(bcsc.mx, fit.ridge.perm$lambda.min)
+preds2 <- predict(ridge.model, bcsc.mx[, -1])
+r2 <- roc(bcsc$cancer_c, preds2, plot=TRUE,legacy.axes=TRUE, print.auc=TRUE, xlab = "False positive", ylab = "True positive", col = "#377eb8")
+
+```

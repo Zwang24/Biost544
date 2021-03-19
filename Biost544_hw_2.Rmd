@@ -1,0 +1,101 @@
+---
+title: "Biost544_hw_2"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+samp.data <- read.csv("~/Downloads/HW2-adaptive-trial.txt")
+```
+# Question 1
+The null hypothesis we are testing is that the standard-of-care is the same effective as the new treatment.
+```{r}
+nsim <- 1000
+simulate.perm.trial <- function(dataset){
+#### create the permuted data
+    perm <- sample(1:nrow(dataset), replace = FALSE)
+    perm.data <- dataset
+    perm.data$tx = dataset$tx[perm]
+#### calculate the mean differences in proportion on permuted data
+    perm.diff.prop <- with(perm.data, mean(outcome[tx == 1]) - mean(outcome[tx == 0]))
+    perm.diff.prop
+}
+#### to calculate response proportions for the treatment and control group
+suppressMessages(respone_proportion <- samp.data%>%
+             group_by(tx) %>%
+             summarise(proportion= mean(outcome)))
+#### calculate the difference in response proportions
+diff.prop <- respone_proportion[2,2] - respone_proportion[1,2]
+#### calculate the set of differences from the permutation tests
+permuted.result <- data.frame((replicate(nsim, simulate.perm.trial(samp.data))))
+mean(permuted.result > as.numeric(diff.prop))
+```
+# Question 2
+The aim for the function is to assess if the observed difference in the response proportions is consistent with the hypothesis that standard of care is least as effective as the new treatment. After constructing the function, we can use the adaptive trial dataset to get the difference in response proportions from the new randomization. After simulating 1000 times, we can plot the distribution of the obtained response proportions and get the p value of around 0.2. With the high p-value, we failed to reject the null that the standard-of-care is the same effective as the new treatment.
+```{r}
+adaptive.random <- function(dataset) {
+dataset$tx.new <- NA
+dataset$pnew <- NA
+dataset$pnew[1] <-0.5
+dataset$tx.new[1] <- rbinom(1, 1, prob = dataset$pnew[1])
+for (i in 1:(nrow(dataset)-1)){
+# for loop is to calculate new prob for the next patient
+old_failures <- dataset[1:i,] %>%
+ filter(tx.new == "0") %>%
+  summarise(n_failure =  sum(outcome == "0")) %>%
+  .$n_failure # the number of failures on the control arm
+new_success <- dataset[1:i,] %>%
+ filter(tx.new == "1") %>%
+  summarise(n_suc =  sum(outcome == "1")) %>%
+  .$n_suc # the number of success on the new treatment arm
+total.patients <- nrow(dataset[1:i,]) # total patients up to that point
+dataset$pnew[i+1] <- (1+3*(old_failures+new_success))/(2+3*total.patients)
+dataset$tx.new[i+1] <- rbinom(1, 1, prob = dataset$pnew[i+1])
+}
+with(dataset, mean(outcome[tx.new==1])-mean(outcome[tx.new==0]))
+}
+prob.diff.ori <- with(samp.data, mean(outcome[tx==1])-mean(outcome[tx==0]))
+prob.diff.alt.set <- replicate(1000,adaptive.random(samp.data))
+mean(prob.diff.alt.set > prob.diff.ori)
+
+```
+# Problem 3
+By permuting the treatment assignment using the function from problem 1, we can get a p value of around 0.08. With the higher than 0.05 p value, we failed to reject the null hypothesis that the treatment is as effective as the standard of care. We can also get the distribution from both functions, and the distribution of randomly permuted response proportions has more peaks and centered around 0. The distribution of the mean proportions obtained from the adaptive method looks more smooth and bell-shaped, and centered also around 0. The tail probability that is larger than the value of the original treatment assignment is bigger while using the adaptive method.
+```{r}
+## distribution of 1
+#### to calculate response proportions for the treatment and control group
+suppressMessages(respone_proportion <- samp.data%>%
+             group_by(tx) %>%
+             summarise(proportion= mean(outcome)))
+#### calculate the difference in response proportions
+diff.prop <- respone_proportion[2,2] - respone_proportion[1,2]
+#### calculate the set of differences from the permutation tests
+permuted.result <- data.frame((replicate(nsim, simulate.perm.trial(samp.data))))
+mean(permuted.result > as.numeric(diff.prop))
+#### Plotting
+colnames(permuted.result) <- "mean_prop"
+ggplot(permuted.result, aes(x=mean_prop, y=..density..)) +
+  geom_density()+
+  geom_vline(xintercept=as.numeric(diff.prop), colour="red")
+
+## distribution of 2a
+prob.diff.alt.set <- replicate(nsim,adaptive.random(samp.data))
+prob.diff.alt.set <- as.data.frame(prob.diff.alt.set)
+colnames(prob.diff.alt.set) <- "mean_prop_alt"
+
+ggplot(prob.diff.alt.set, aes(x=mean_prop_alt, y=..density..)) +
+  geom_density()+
+  geom_vline(xintercept=as.numeric(prob.diff.ori), colour="red")
+
+bind.data <- cbind(permuted.result, prob.diff.alt.set)
+ggplot(bind.data) +
+  geom_density(aes(x=mean_prop, y=..density.., color = "Random permutation - 1"))+
+  geom_density(aes(x=mean_prop_alt, y=..density.., color = "Adaptive trial - 2b"))+
+  geom_vline(xintercept=as.numeric(prob.diff.ori), colour="red") +
+  labs(title = "Comparing distributions obtained from problem 1 and 2b") +
+  xlab("Response proportion")
+```

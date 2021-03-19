@@ -1,0 +1,132 @@
+---
+title: "Biost544_hw3"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(readr)
+library(caret)
+library(glmnet)
+library(data.table)
+#load the clinical data
+clinical_data <- read.csv("~/Downloads/clinical_data.csv", header = TRUE)[,-1]
+#use fread to load the probeID data
+probeID <- 
+ fread("~/Downloads/expression_data_probeID.csv",header = TRUE, sep = ',')[,-1]
+annotation <- read.csv("~/Downloads/annotation.csv",header = TRUE)
+```
+# Processing the dataset
+```{r}
+# delete the duplicated genes
+unique.annote <- annotation[!duplicated(annotation$gene.names),]
+# matching the features that has corresponding gene names, credit to my classmate Yunbi
+matched <- c("centerid","patid",unique.annote[which(unique.annote[,2]!=""),1])
+probe.matched <- probeID %>% select(all_of(matched))
+# subseting the clinical data
+
+# the finished dataset used for this homework
+NOAH.hw <- inner_join(NOAH.clincal.keep, probe.matched, by=c("centerid","patid"))
+```
+
+# Part I: Lasso
+For this approach, I first calculated the variances for each of the feature across all of the patients, and then select 300 features that have the highest variances. The rationale behind this step is that if a gene expression does changes a lot through different people, it is likely that it can contribute to the phenotype differences. And for the same reason, if a gene stay unchanged through tested objects, it is highly likely that its expression does not vary due to phenotype differences, it might be a gene that contribute to essential functions of the body rather than cancer. After select gene that shows highest variances, I fitted a lasso predictive model and use 10 fold cross validation to select a model with the lowest MSE. The maximum value of lambda is 1. If the lambda value increases, as the penalty increases, only the intercept is non-zero from the lasso model. Since I performed 10-fold cross validation, there should not be significant overfitting problems. Features and corresponding gene names are listed as well.
+```{r}
+# create the lambda sequence
+nlambda <- 1000
+maxlambda <- 1
+lambda.seq <- seq(maxlambda, maxlambda*0.001, length.out=nlambda)
+# try to get the variances of each of the feature and select the ones with bigger variances
+vars <- as.data.frame(t(apply(NOAH.hw[,-(1:2)], 2, var)))
+# add the variance to the dataset
+NOAH.dec <- rbind(NOAH.hw[,-(1:2)], vars)
+# order in a descending way
+NOAH.fin2 <- NOAH.dec[,order(-NOAH.dec[nrow(NOAH.dec),])]
+# glmnet requires a matrix format
+XX <- as.matrix(NOAH.fin2[,(1:301)])
+# the main analysis, nfold = 10 because only over 150 observations
+fit.cv <- cv.glmnet(x=XX[, (2:301)], y=XX[,1], alpha=1,nfolds = 10,lambda=lambda.seq)
+# plot to show which model has the lowest MSE
+plot(fit.cv)
+# show the coefficient from the lasso
+coef.list <- coef(fit.cv, s=fit.cv$lambda.min)
+# the selected features
+features.lasso <- c("X1568574_x_at", "X205009_at","X229623_at","X219850_s_at","X206227_at","X218309_at ",
+"X219956_at","X211682_x_at")
+# the corresponding gene names
+names.lasso <- c("SPP1","TFF1","TMEM150C","EHF","CILP","CAMK2N1","GALNT6","UGT2B28")
+res.tb.lasso <- data.frame(features.lasso,names.lasso, stringsAsFactors = FALSE)
+res.tb.lasso
+
+```
+# Part II: Screening Based Approach
+For the screening based approach, I used the cor.test function and method being the "Kendall" method, and apply this function to the outcome and each of the gene feature(predictor of interest) in our dataset. After getting the correlations between outcome and each predictor, I arranged them and selected top 50 predictors that were mostly correlated with the outcome according to the observed result. Then I used the step function and select a formula based model by AIC. I tried to fit all over 20000 features with lm but it seems that it reaches the maximum in Rstudio, so I tried to pick some most correlated features for the step fucntion to use. After splitting the whole dataset into training and testing sets, I used the step function on the training set to find the model that leads to the lowest AIC value, and used this exactly model in the testing set and get a AIC value of 471. In theory the smaller AIC will be better, AIC estimates the quality of the models compared to other models, in our case, models that has more predictor variables in a stepwise way. And it is a measure of model selection.Features and corresponding gene names are listed as well.
+```{r}
+nset <- seq(4, ncol(NOAH.hw), 1)
+# the function for getting the correlation "tau" from the cor.test using "kendall" method
+get.estimate <- function(n){
+res <- with(NOAH.hw,
+     cor.test(NOAH.hw$necrotic_cells.pct, NOAH.hw[,n], method = "kendall"))
+res$estimate
+}
+# get the list
+estimate.set <- lapply(nset, get.estimate)
+# turn list into numeric type
+estimate.set <- abs(as.numeric(estimate.set))
+# change to a data frame with one row
+cor.row <- as.data.frame(t(estimate.set))
+# assign the column names from the original dataset
+colnames(cor.row) <- colnames(NOAH.hw[,-(1:3)]) 
+# bind the correlation set with the dataset
+NOAH.cor <- rbind(NOAH.hw[,-(1:3)], cor.row)
+# order the correlation to have a descending order
+NOAH.screen <- NOAH.cor[,order(-NOAH.cor[nrow(NOAH.cor),])]
+NOAH.screen1 <- NOAH.screen[,1:50] # selecting top 200 features
+NOAH.screen.fin <- NOAH.screen1[-153,] # delete the correlation after use
+# adding the outcome of interest to processed dataset
+NOAH.screen.fin <- cbind(NOAH.hw$necrotic_cells.pct, NOAH.screen.fin)
+colnames(NOAH.screen.fin)[1] <- "necrotic_cells.pct"
+# splitting the dataset
+set.seed(1)
+test_index <- createDataPartition(NOAH.screen.fin$necrotic_cells.pct, times=1, p=0.5, list=FALSE)
+## define the training and testing set
+test_set <- NOAH.screen.fin[test_index, ]
+train_set <- NOAH.screen.fin[-test_index, ]
+# applying the step function
+lm1 <- lm(necrotic_cells.pct~., train_set)
+set.seed(1)
+slm1 <- step(lm1,trace=FALSE)
+#summary(slm1)
+# testing the model in testing set, model copied from summary of slm1
+lm.cv <- lm(formula = necrotic_cells.pct ~ X220222_at + X221779_at + X225044_at + 
+    X205011_at + X218309_at + X1553588_at + X219236_at + X1554866_at + 
+    X1569105_at + X201541_s_at + X208797_s_at + X202689_at + 
+    X219359_at + X1553538_s_at + X221156_x_at + X203477_at + 
+    X229623_at + X204567_s_at + X221331_x_at + X221530_s_at + 
+    X1553567_s_at + X218693_at + X205632_s_at + X1553569_at + 
+    X1554531_at + X224372_at + X219563_at + X223777_at + X1558977_at + 
+    X242908_x_at, data = test_set)
+# get the summary of the fit
+#summary(lm.cv)
+# calculate the AIC for the fit value
+AIC(lm.cv)
+
+features.2 <- 
+  c("X220222_at","X221779_at", "X225044_at","X205011_at", "X218309_at",
+   "X1553588_at", "X219236_at", "X1554866_at", "X1569105_at","X201541_s_at",
+   "X208797_s_at","X202689_at", "X219359_at", "X1553538_s_at", "X221156_x_at",
+   "X203477_at", "X229623_at", "X204567_s_at","X221331_x_at","X221530_s_at",
+    "X1553567_s_at","X218693_at","X205632_s_at","X1553569_at","X1554531_at",
+   "X224372_at","X219563_at","X223777_at","X1558977_at", "X242908_x_at")
+# the corresponding gene names
+names.2 <- c("RBM12B-AS1","MICALL1","NT5C3B","VWA5A","CAMK2N1",
+           "ND3 /// SH3KBP1","PAQR6","TMEM135","SETD5","ZNHIT1",
+           "GOLGA8A","RBM15B","ATHL1","COX1","CCPG1",
+           "COL15A1","TMEM150C","ABCG1","CTLA4","BHLHE41",
+           "ATP6","TSPAN15","PIP5K1B","COX2","TTC12",
+           "ND4","LINC00341 /// SYNE3","DDX11L2","LOC100130992","RP5-1007H16.1")
+res.tb.2 <- data.frame(features.2,names.2, stringsAsFactors = FALSE)
+res.tb.2
+
+```
